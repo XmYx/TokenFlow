@@ -69,7 +69,9 @@ class Preprocess(nn.Module):
         elif self.sd_version == 'depth':
             self.depth_maps = self.prepare_depth_maps()
         self.scheduler = DDIMScheduler.from_pretrained(model_key, subfolder="scheduler")
-        
+
+        torch.backends.cuda.matmul.allow_tf32 = True
+        self.unet.to(memory_format=torch.channels_last)
         # self.unet.enable_xformers_memory_efficient_attention()
         print(f'[INFO] loaded stable diffusion!')
         
@@ -196,7 +198,7 @@ class Preprocess(nn.Module):
         return paths, frames, latents
 
     @torch.no_grad()
-    def ddim_inversion(self, cond, latent_frames, save_path, batch_size, save_latents=True, timesteps_to_save=None):
+    def ddim_inversion_(self, cond, latent_frames, save_path, batch_size, save_latents=True, timesteps_to_save=None):
         timesteps = reversed(self.scheduler.timesteps)
         timesteps_to_save = timesteps_to_save if timesteps_to_save is not None else timesteps
         for i, t in enumerate(tqdm(timesteps)):
@@ -228,6 +230,60 @@ class Preprocess(nn.Module):
                 torch.save(latent_frames, os.path.join(save_path, 'latents', f'noisy_latents_{t}.pt'))
         torch.save(latent_frames, os.path.join(save_path, 'latents', f'noisy_latents_{t}.pt'))
         return latent_frames
+
+    @torch.no_grad()
+    def ddim_inversion(self, cond, latent_frames, save_path, batch_size, save_latents=True, timesteps_to_save=None):
+        timesteps = list(reversed(self.scheduler.timesteps))
+        timesteps_to_save = timesteps_to_save if timesteps_to_save is not None else timesteps
+
+        # Check if there are any saved noisy_latents and determine the last saved timestep
+        last_saved_timestep = None
+        for t in timesteps:
+            save_filename = os.path.join(save_path, 'latents', f'noisy_latents_{t}.pt')
+            if os.path.exists(save_filename) and os.path.getsize(save_filename) > 0:
+                latent_frames = torch.load(save_filename)
+                last_saved_timestep = t
+                break
+
+        # If a saved timestep was found, resume from there
+        if last_saved_timestep:
+            timesteps = timesteps[timesteps.index(last_saved_timestep):]
+
+        for i, t in enumerate(timesteps):
+            for b in range(0, latent_frames.shape[0], batch_size):
+                x_batch = latent_frames[b:b + batch_size]
+                model_input = x_batch
+                cond_batch = cond.repeat(x_batch.shape[0], 1, 1)
+                if self.sd_version == 'depth':
+                    depth_maps = torch.cat([self.depth_maps[b: b + batch_size]])
+                    model_input = torch.cat([x_batch, depth_maps], dim=1)
+
+                alpha_prod_t = self.scheduler.alphas_cumprod[t]
+                alpha_prod_t_prev = (
+                    self.scheduler.alphas_cumprod[timesteps[i - 1]]
+                    if i > 0 else self.scheduler.final_alpha_cumprod
+                )
+
+                mu = alpha_prod_t ** 0.5
+                mu_prev = alpha_prod_t_prev ** 0.5
+                sigma = (1 - alpha_prod_t) ** 0.5
+                sigma_prev = (1 - alpha_prod_t_prev) ** 0.5
+
+                eps = self.unet(model_input, t, encoder_hidden_states=cond_batch).sample if self.sd_version != 'ControlNet' \
+                    else self.controlnet_pred(x_batch, t, cond_batch, torch.cat([self.canny_cond[b: b + batch_size]]))
+                pred_x0 = (x_batch - sigma_prev * eps) / mu_prev
+                latent_frames[b:b + batch_size] = mu * pred_x0 + sigma * eps
+
+            if save_latents and t in timesteps_to_save:
+                save_filename = os.path.join(save_path, 'latents', f'noisy_latents_{t}.pt')
+                if not os.path.exists(save_filename) or os.path.getsize(save_filename) == 0:
+                    torch.save(latent_frames, save_filename)
+
+        save_filename = os.path.join(save_path, 'latents', f'noisy_latents_{t}.pt')
+        if not os.path.exists(save_filename) or os.path.getsize(save_filename) == 0:
+            torch.save(latent_frames, save_filename)
+        return latent_frames
+
 
     @torch.no_grad()
     def ddim_sample(self, x, cond, batch_size):
@@ -285,6 +341,7 @@ class Preprocess(nn.Module):
 
 
 def prep(opt):
+    device = 'cuda'
     # timesteps to save
     if opt.sd_version == '2.1':
         model_key = "stabilityai/stable-diffusion-2-1-base"

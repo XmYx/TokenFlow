@@ -1,5 +1,6 @@
 import glob
 import os
+import re
 from pathlib import Path
 import torch
 import torch.nn as nn
@@ -58,7 +59,7 @@ class TokenFlow(nn.Module):
         print('SD model loaded')
 
         # data
-        self.latents_path = self.get_latents_path()
+        self.latents_path = self.get_latents_path(config)
         self.keyframes_path = [os.path.join(config["data_path"], "%05d.jpg" % idx) for idx in
                                range(self.config["n_frames"])]
         if not os.path.exists(self.keyframes_path[0]):
@@ -78,11 +79,12 @@ class TokenFlow(nn.Module):
             inv_prompt = f.read()
         return inv_prompt
 
-    def get_latents_path(self):
+    def get_latents_path(self, config):
         latents_path = os.path.join(config["latents_path"], f'sd_{config["sd_version"]}',
                              Path(config["data_path"]).stem,)
         latents_path = [x for x in glob.glob(f'{latents_path}/*/*') if not x.startswith('.')]
-        n_frames = [int([x for x in latents_path[i].split('/') if 'nframes' in x][0].split('_')[1]) for i in range(len(latents_path))]
+        pattern = re.compile(".*nframes_([0-9]+)")
+        n_frames = [int(g[1]) for g in [pattern.match(latents_path[i]) for i in range(len(latents_path))] if g]
         latents_path = latents_path[np.argmax(n_frames)]
         self.config["n_frames"] = min(max(n_frames), config["n_frames"])
         if self.config["n_frames"] % self.config["batch_size"] != 0:
@@ -192,7 +194,7 @@ class TokenFlow(nn.Module):
         register_extended_attention(self)
         set_tokenflow(self.unet)
         
-    def edit_video(self):
+    def edit_video(self, config):
         os.makedirs(f'{self.config["output_path"]}/img_ode', exist_ok=True)
         self.init_method()
         noise = self.eps if config["use_ddim_noise"] else torch.randn_like(self.eps[[0]]).repeat(self.eps.shape[0])
@@ -261,7 +263,7 @@ def run(config):
     seed_everything(config["seed"])
     print(config)
     editor = TokenFlow(config)
-    editor.edit_video()
+    editor.edit_video(config)
 
 
 if __name__ == '__main__':
