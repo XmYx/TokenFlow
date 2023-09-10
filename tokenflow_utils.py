@@ -48,7 +48,7 @@ def load_source_latents_t(t, latents_path):
 
 def register_conv_injection(model, injection_schedule):
     def conv_forward(self):
-        def forward(input_tensor, temb):
+        def forward(input_tensor, temb,scale=None):
             hidden_states = input_tensor
 
             hidden_states = self.norm1(hidden_states)
@@ -111,7 +111,7 @@ def register_extended_attention_pnp(model, injection_schedule):
         else:
             to_out = self.to_out
 
-        def forward(x, encoder_hidden_states=None, attention_mask=None):
+        def forward(x, encoder_hidden_states=None, attention_mask=None, scale=None):
             batch_size, sequence_length, dim = x.shape
             h = self.heads
             n_frames = batch_size // 3
@@ -221,7 +221,7 @@ def register_extended_attention(model):
         else:
             to_out = self.to_out
 
-        def forward(x, encoder_hidden_states=None, attention_mask=None):
+        def forward(x, encoder_hidden_states=None, attention_mask=None, scale=None):
             batch_size, sequence_length, dim = x.shape
             h = self.heads
             n_frames = batch_size // 3
@@ -306,6 +306,7 @@ def make_tokenflow_attention_block(block_class: Type[torch.nn.Module]) -> Type[t
             timestep=None,
             cross_attention_kwargs=None,
             class_labels=None,
+            scale=None,
         ) -> torch.Tensor:
             
             batch_size, sequence_length, dim = hidden_states.shape
