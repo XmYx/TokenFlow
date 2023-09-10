@@ -73,6 +73,7 @@ class Preprocess(nn.Module):
         torch.backends.cuda.matmul.allow_tf32 = True
         self.unet.to(memory_format=torch.channels_last)
         # self.unet.enable_xformers_memory_efficient_attention()
+        self.opt = opt
         print(f'[INFO] loaded stable diffusion!')
         
     @torch.no_grad()   
@@ -198,11 +199,19 @@ class Preprocess(nn.Module):
         return paths, frames, latents
 
     @torch.no_grad()
-    def ddim_inversion_(self, cond, latent_frames, save_path, batch_size, save_latents=True, timesteps_to_save=None):
+    def ddim_inversion(self, cond, latent_frames, save_path, batch_size, save_latents=True, timesteps_to_save=None):
+        print('running orriginal inversion')
         timesteps = reversed(self.scheduler.timesteps)
+
         timesteps_to_save = timesteps_to_save if timesteps_to_save is not None else timesteps
         for i, t in enumerate(tqdm(timesteps)):
             for b in range(0, latent_frames.shape[0], batch_size):
+
+                if 'callback' in self.opt:
+                    callback = self.opt.callback
+                    if callback:
+                        callback(i)
+
                 x_batch = latent_frames[b:b + batch_size]
                 model_input = x_batch
                 cond_batch = cond.repeat(x_batch.shape[0], 1, 1)
@@ -232,7 +241,7 @@ class Preprocess(nn.Module):
         return latent_frames
 
     @torch.no_grad()
-    def ddim_inversion(self, cond, latent_frames, save_path, batch_size, save_latents=True, timesteps_to_save=None):
+    def ddim_inversion_(self, cond, latent_frames, save_path, batch_size, save_latents=True, timesteps_to_save=None):
         timesteps = list(reversed(self.scheduler.timesteps))
         timesteps_to_save = timesteps_to_save if timesteps_to_save is not None else timesteps
 
