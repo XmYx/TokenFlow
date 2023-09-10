@@ -1,5 +1,8 @@
 import glob
 import os
+import re
+from datetime import datetime
+
 import numpy as np
 import cv2
 from pathlib import Path
@@ -57,9 +60,9 @@ class TokenFlow(nn.Module):
         print('SD model loaded')
 
         # data
-        self.latents_path = self.get_latents_path()
+        self.latents_path = self.get_latents_path(config)
         # load frames
-        self.paths, self.frames, self.latents, self.eps = self.get_data()
+        self.paths, self.frames, self.latents, self.eps = self.get_data(config)
         if self.sd_version == 'depth':
             self.depth_maps = self.prepare_depth_maps()
 
@@ -111,11 +114,15 @@ class TokenFlow(nn.Module):
             inv_prompt = f.read()
         return inv_prompt
 
-    def get_latents_path(self):
+    def get_latents_path(self, config):
         latents_path = os.path.join(config["latents_path"], f'sd_{config["sd_version"]}',
                              Path(config["data_path"]).stem, f'steps_{config["n_inversion_steps"]}')
         latents_path = [x for x in glob.glob(f'{latents_path}/*') if '.' not in Path(x).name]
-        n_frames = [int([x for x in latents_path[i].split('/') if 'nframes' in x][0].split('_')[1]) for i in range(len(latents_path))]
+
+        #n_frames = [int([x for x in latents_path[i].split('/') if 'nframes' in x][0].split('_')[1]) for i in range(len(latents_path))]
+        pattern = re.compile(".*nframes_([0-9]+)")
+        n_frames = [int(g[1]) for g in [pattern.match(latents_path[i]) for i in range(len(latents_path))] if g]
+
         latents_path = latents_path[np.argmax(n_frames)]
         self.config["n_frames"] = min(max(n_frames), config["n_frames"])
         if self.config["n_frames"] % self.config["batch_size"] != 0:
@@ -163,7 +170,7 @@ class TokenFlow(nn.Module):
         return imgs
 
     
-    def get_data(self):
+    def get_data(self, config):
         # load frames
         paths = [os.path.join(config["data_path"], "%05d.jpg" % idx) for idx in
                                range(self.config["n_frames"])]
@@ -193,7 +200,7 @@ class TokenFlow(nn.Module):
         return eps
 
     @torch.no_grad()
-    def denoise_step(self, x, t, indices):
+    def denoise_step(self, x, t, indices, *args, **kwargs):
         # register the time step and features in pnp injection modules
         source_latents = load_source_latents_t(t, self.latents_path)[indices]
         latent_model_input = torch.cat([source_latents] + ([x] * 2))
@@ -218,7 +225,7 @@ class TokenFlow(nn.Module):
         return denoised_latent
     
     @torch.autocast(dtype=torch.float16, device_type='cuda')
-    def batched_denoise_step(self, x, t, indices):
+    def batched_denoise_step(self, x, t, indices, *args, **kwargs):
         batch_size = self.config["batch_size"]
         denoised_latents = []
         pivotal_idx = torch.randint(batch_size, (len(x)//batch_size,)) + torch.arange(0,len(x),batch_size) 
@@ -256,9 +263,14 @@ class TokenFlow(nn.Module):
         self.init_method(conv_injection_t=pnp_f_t, qk_injection_t=pnp_attn_t)
         noisy_latents = self.scheduler.add_noise(self.latents, self.eps, self.scheduler.timesteps[0])
         edited_frames = self.sample_loop(noisy_latents, torch.arange(self.config["n_frames"]))
-        save_video(edited_frames, f'{self.config["output_path"]}/tokenflow_PnP_fps_10.mp4')
-        save_video(edited_frames, f'{self.config["output_path"]}/tokenflow_PnP_fps_20.mp4', fps=20)
-        save_video(edited_frames, f'{self.config["output_path"]}/tokenflow_PnP_fps_30.mp4', fps=30)
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        base_name = f'{self.config["output_path"]}/{timestamp}_{self.config["seed"]}_tokenflow_PnP_fps_'
+
+        fps_s = [10, 20, 30]
+        for fps in fps_s:
+            save_video(edited_frames, f'{base_name}{str(fps)}.mp4', fps=fps)
+            
         print('Done!')
 
     def sample_loop(self, x, indices):
@@ -275,7 +287,6 @@ class TokenFlow(nn.Module):
 
 def run(config):
     seed_everything(config["seed"])
-    print(config)
     editor = TokenFlow(config)
     editor.edit_video()
 
